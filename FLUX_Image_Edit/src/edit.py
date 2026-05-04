@@ -43,7 +43,7 @@ def encode(init_image, torch_device, ae):
 def main(
     args,
     seed: int | None = None,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    device: str = "cuda",
     num_steps: int | None = None,
     loop: bool = False,
     offload: bool = False,
@@ -72,7 +72,7 @@ def main(
     source_prompt = args.source_prompt
     target_prompt = args.target_prompt
     guidance = args.guidance
-    output_dir = args.output_dir
+    output_dir = os.path.join(args.output_dir, f"beta{args.beta}") if args.beta != 0.0 else args.output_dir
     num_steps = args.num_steps
     offload = args.offload
 
@@ -155,13 +155,29 @@ def main(
 
         # inversion initial noise
         z, info = denoise(model, **inp, timesteps=timesteps, guidance=1, inverse=True, info=info)
-        
+
         inp_target["img"] = z
 
         timesteps = get_schedule(opts.num_steps, inp_target["img"].shape[1], shift=(name != "flux-schnell"))
 
+        # Compute idempotent corrector residual F(y₀) − y₀
+        residual = None
+        if args.beta != 0.0:
+            info_recon = {
+                'feature_path': args.feature_path,
+                'feature': {},
+                'inject_step': 0,  # no feature injection → clean round-trip
+            }
+            inp_recon = {**inp, 'img': z}
+            timesteps_recon = get_schedule(opts.num_steps, z.shape[1], shift=(name != "flux-schnell"))
+            y0_recon, _ = denoise(model, **inp_recon, timesteps=timesteps_recon,
+                                  guidance=1, inverse=False, info=info_recon)
+            residual = y0_recon - inp["img"]
+            print(f"‖F(y₀) − y₀‖ = {residual.float().norm().item():.4f}")
+
         # denoise initial noise
-        x, _ = denoise(model, **inp_target, timesteps=timesteps, guidance=guidance, inverse=False, info=info)
+        x, _ = denoise(model, **inp_target, timesteps=timesteps, guidance=guidance,
+                       inverse=False, info=info, beta=args.beta, residual=residual)
         
         if offload:
             model.cpu()
@@ -242,6 +258,8 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', default='output', type=str,
                         help='the path of the edited image')
     parser.add_argument('--offload', action='store_true', help='set it to True if the memory of GPU is not enough')
+    parser.add_argument('--beta', type=float, default=0.0,
+                        help='idempotent corrector strength: beta * (F(y0) - y0)_projected')
 
     args = parser.parse_args()
 

@@ -85,8 +85,10 @@ def denoise(
     # sampling parameters
     timesteps: list[float],
     inverse,
-    info, 
-    guidance: float = 4.0
+    info,
+    guidance: float = 4.0,
+    beta: float = 0.0,
+    residual: Tensor | None = None,
 ):
     # this is ignored for schnell
     inject_list = [True] * info['inject_step'] + [False] * (len(timesteps[:-1]) - info['inject_step'])
@@ -114,6 +116,12 @@ def denoise(
             guidance=guidance_vec,
             info=info
         )
+
+        # Idempotent corrector: β·(F(y₀) − y₀) projected onto current velocity
+        if beta != 0.0 and residual is not None and not inverse:
+            pred_norm_sq = (pred ** 2).sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            proj_coeff = (residual * pred).sum(dim=-1, keepdim=True) / pred_norm_sq
+            pred = pred + beta * (proj_coeff * pred)
 
         img_mid = img + (t_prev - t_curr) / 2 * pred
 
